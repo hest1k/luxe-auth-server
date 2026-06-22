@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: luxe-auth-server
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_KEY
+        generateValue: true
+      - key: DB_PATH
+        value: /data/users.db
+    disk:
+      name: luxe-db
+      mountPath: /data
+      sizeGB: 1
