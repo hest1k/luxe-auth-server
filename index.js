@@ -29,23 +29,25 @@ const db = createClient({
 
 // ─── Инициализация таблиц ─────────────────────────────────────────────────────
 async function initDB() {
-  await db.execute(`CREATE TABLE IF NOT EXISTS users (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    username    TEXT    UNIQUE NOT NULL,
-    password    TEXT    NOT NULL,
-    hwid        TEXT    DEFAULT NULL,
-    hwid_raw    TEXT    DEFAULT NULL,
-    hwid_locked INTEGER DEFAULT 0,
-    banned      INTEGER DEFAULT 0,
-    created_at  TEXT    DEFAULT (datetime('now')),
-    last_login  TEXT    DEFAULT NULL
-  )`);
-  await db.execute(`CREATE TABLE IF NOT EXISTS sessions (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER NOT NULL,
-    token      TEXT    NOT NULL,
-    created_at TEXT    DEFAULT (datetime('now'))
-  )`);
+  await db.batch([
+    `CREATE TABLE IF NOT EXISTS users (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      username    TEXT    UNIQUE NOT NULL,
+      password    TEXT    NOT NULL,
+      hwid        TEXT    DEFAULT NULL,
+      hwid_raw    TEXT    DEFAULT NULL,
+      hwid_locked INTEGER DEFAULT 0,
+      banned      INTEGER DEFAULT 0,
+      created_at  TEXT    DEFAULT (datetime('now')),
+      last_login  TEXT    DEFAULT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS sessions (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id    INTEGER NOT NULL,
+      token      TEXT    NOT NULL,
+      created_at TEXT    DEFAULT (datetime('now'))
+    )`,
+  ], 'write');
   // Добавляем hwid_raw если таблица уже существовала без неё
   try {
     await db.execute('ALTER TABLE users ADD COLUMN hwid_raw TEXT DEFAULT NULL');
