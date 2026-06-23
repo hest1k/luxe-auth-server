@@ -35,6 +35,7 @@ async function initDB() {
       username    TEXT    UNIQUE NOT NULL,
       password    TEXT    NOT NULL,
       hwid        TEXT    DEFAULT NULL,
+      hwid_raw    TEXT    DEFAULT NULL,
       hwid_locked INTEGER DEFAULT 0,
       banned      INTEGER DEFAULT 0,
       created_at  TEXT    DEFAULT (datetime('now')),
@@ -47,10 +48,15 @@ async function initDB() {
       created_at TEXT    DEFAULT (datetime('now'))
     );
   `);
+  // Добавляем hwid_raw если таблица уже существовала без неё
+  try {
+    await db.execute('ALTER TABLE users ADD COLUMN hwid_raw TEXT DEFAULT NULL');
+  } catch (_) { /* уже есть */ }
   console.log('✅ БД готова');
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+// HWID храним открыто — только хэшируем для сравнения при входе
 const hashHwid = (hwid) =>
   crypto.createHash('sha256').update(hwid).digest('hex');
 
@@ -104,8 +110,8 @@ app.post('/auth/register', async (req, res) => {
     const hashedHwid = hashHwid(hwid);
 
     await db.execute({
-      sql:  'INSERT INTO users (username, password, hwid, hwid_locked) VALUES (?, ?, ?, 1)',
-      args: [username, hashed, hashedHwid],
+      sql:  'INSERT INTO users (username, password, hwid, hwid_raw, hwid_locked) VALUES (?, ?, ?, ?, 1)',
+      args: [username, hashed, hashedHwid, hwid],
     });
 
     const userRow = await db.execute({
@@ -160,8 +166,8 @@ app.post('/auth/login', async (req, res) => {
         });
     } else {
       await db.execute({
-        sql:  'UPDATE users SET hwid = ?, hwid_locked = 1 WHERE id = ?',
-        args: [hashedHwid, Number(user.id)],
+        sql:  'UPDATE users SET hwid = ?, hwid_raw = ?, hwid_locked = 1 WHERE id = ?',
+        args: [hashedHwid, hwid, Number(user.id)],
       });
     }
 
@@ -217,7 +223,7 @@ app.post('/auth/verify', authMiddleware, async (req, res) => {
 
 app.get('/admin/users', adminMiddleware, async (_req, res) => {
   const result = await db.execute(
-    'SELECT id, username, hwid_locked, banned, created_at, last_login FROM users ORDER BY created_at DESC'
+    'SELECT id, username, hwid_raw, hwid_locked, banned, created_at, last_login FROM users ORDER BY created_at DESC'
   );
   res.json(result.rows);
 });
