@@ -29,25 +29,23 @@ const db = createClient({
 
 // ─── Инициализация таблиц ─────────────────────────────────────────────────────
 async function initDB() {
-  await db.executeMultiple(`
-    CREATE TABLE IF NOT EXISTS users (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      username    TEXT    UNIQUE NOT NULL,
-      password    TEXT    NOT NULL,
-      hwid        TEXT    DEFAULT NULL,
-      hwid_raw    TEXT    DEFAULT NULL,
-      hwid_locked INTEGER DEFAULT 0,
-      banned      INTEGER DEFAULT 0,
-      created_at  TEXT    DEFAULT (datetime('now')),
-      last_login  TEXT    DEFAULT NULL
-    );
-    CREATE TABLE IF NOT EXISTS sessions (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id    INTEGER NOT NULL,
-      token      TEXT    NOT NULL,
-      created_at TEXT    DEFAULT (datetime('now'))
-    );
-  `);
+  await db.execute(`CREATE TABLE IF NOT EXISTS users (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    username    TEXT    UNIQUE NOT NULL,
+    password    TEXT    NOT NULL,
+    hwid        TEXT    DEFAULT NULL,
+    hwid_raw    TEXT    DEFAULT NULL,
+    hwid_locked INTEGER DEFAULT 0,
+    banned      INTEGER DEFAULT 0,
+    created_at  TEXT    DEFAULT (datetime('now')),
+    last_login  TEXT    DEFAULT NULL
+  )`);
+  await db.execute(`CREATE TABLE IF NOT EXISTS sessions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    token      TEXT    NOT NULL,
+    created_at TEXT    DEFAULT (datetime('now'))
+  )`);
   // Добавляем hwid_raw если таблица уже существовала без неё
   try {
     await db.execute('ALTER TABLE users ADD COLUMN hwid_raw TEXT DEFAULT NULL');
@@ -83,6 +81,132 @@ function adminMiddleware(req, res, next) {
 
 app.get('/', (_req, res) => {
   res.json({ status: 'ok', name: 'Luxe Auth Server', version: '1.0.0' });
+});
+
+// ─── Веб-панель администратора ────────────────────────────────────────────────
+app.get('/admin/panel', (req, res) => {
+  const key = req.query.key;
+  if (key !== ADMIN_KEY) {
+    return res.send(`
+      <html><head><meta charset="utf-8">
+      <title>Luxe Admin</title>
+      <style>
+        body{background:#0f1117;color:#e8e9f0;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+        .box{background:#1a1d27;padding:32px;border-radius:16px;width:320px}
+        h2{margin:0 0 20px;color:#7c6ff7}
+        input{width:100%;padding:10px;background:#0f1117;border:1px solid #23263a;border-radius:8px;color:#fff;font-size:14px;box-sizing:border-box}
+        button{width:100%;margin-top:12px;padding:12px;background:linear-gradient(135deg,#7c6ff7,#a78bfa);border:none;border-radius:8px;color:#fff;font-size:15px;font-weight:700;cursor:pointer}
+      </style></head>
+      <body><div class="box">
+        <h2>Luxe Admin Panel</h2>
+        <input type="password" id="k" placeholder="Admin Key..." />
+        <button onclick="location.href='/admin/panel?key='+document.getElementById('k').value">Войти</button>
+      </div></body></html>
+    `);
+  }
+  res.send(`
+    <!DOCTYPE html><html><head><meta charset="utf-8">
+    <title>Luxe Admin Panel</title>
+    <style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{background:#0f1117;color:#e8e9f0;font-family:'Segoe UI',sans-serif;padding:24px}
+      h1{color:#7c6ff7;margin-bottom:20px;font-size:22px}
+      .stats{display:flex;gap:12px;margin-bottom:24px}
+      .stat{background:#1a1d27;border:1px solid #23263a;border-radius:12px;padding:16px 24px;text-align:center}
+      .stat-val{font-size:28px;font-weight:800;color:#7c6ff7}
+      .stat-lbl{font-size:12px;color:#6b6f85;margin-top:4px}
+      table{width:100%;border-collapse:collapse;background:#1a1d27;border-radius:12px;overflow:hidden}
+      th{background:#13151c;padding:12px 16px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#6b6f85}
+      td{padding:12px 16px;border-top:1px solid #23263a;font-size:13px}
+      .badge{padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700}
+      .badge-ok{background:rgba(34,197,94,.15);color:#22c55e}
+      .badge-ban{background:rgba(232,64,87,.15);color:#e84057}
+      .badge-lock{background:rgba(124,111,247,.15);color:#7c6ff7}
+      .hwid{font-family:monospace;font-size:11px;color:#9295a8;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .actions{display:flex;gap:6px}
+      .btn{padding:4px 10px;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600}
+      .btn-reset{background:rgba(124,111,247,.2);color:#7c6ff7}
+      .btn-ban{background:rgba(232,64,87,.2);color:#e84057}
+      .btn-del{background:rgba(255,255,255,.08);color:#9295a8}
+      input[type=text]{background:#0f1117;border:1px solid #23263a;border-radius:8px;padding:8px 12px;color:#fff;font-size:13px;width:220px}
+      .search-bar{display:flex;gap:10px;margin-bottom:16px;align-items:center}
+      .refresh{padding:8px 16px;background:rgba(124,111,247,.15);border:1px solid rgba(124,111,247,.3);border-radius:8px;color:#7c6ff7;cursor:pointer;font-size:13px}
+    </style></head>
+    <body>
+    <h1>⚡ Luxe Admin Panel</h1>
+    <div class="stats" id="stats"></div>
+    <div class="search-bar">
+      <input type="text" id="search" placeholder="Поиск по нику..." oninput="filterTable()" />
+      <button class="refresh" onclick="loadUsers()">↻ Обновить</button>
+    </div>
+    <table><thead><tr>
+      <th>#</th><th>Никнейм</th><th>HWID</th><th>Статус</th><th>Регистрация</th><th>Последний вход</th><th>Действия</th>
+    </tr></thead><tbody id="tbody"></tbody></table>
+
+    <script>
+    const KEY = '${key}';
+    let allUsers = [];
+
+    async function loadUsers() {
+      const r = await fetch('/admin/users', { headers: { 'x-admin-key': KEY } });
+      allUsers = await r.json();
+      renderUsers(allUsers);
+      document.getElementById('stats').innerHTML =
+        '<div class="stat"><div class="stat-val">'+allUsers.length+'</div><div class="stat-lbl">Всего</div></div>' +
+        '<div class="stat"><div class="stat-val">'+allUsers.filter(u=>!u.banned).length+'</div><div class="stat-lbl">Активных</div></div>' +
+        '<div class="stat"><div class="stat-val">'+allUsers.filter(u=>u.banned).length+'</div><div class="stat-lbl">Забанено</div></div>' +
+        '<div class="stat"><div class="stat-val">'+allUsers.filter(u=>u.hwid_locked).length+'</div><div class="stat-lbl">С HWID</div></div>';
+    }
+
+    function renderUsers(users) {
+      const tbody = document.getElementById('tbody');
+      tbody.innerHTML = users.map((u,i) => \`
+        <tr>
+          <td style="color:#6b6f85">\${i+1}</td>
+          <td><b>\${u.username}</b></td>
+          <td><div class="hwid" title="\${u.hwid_raw||'—'}">\${u.hwid_raw||'—'}</div></td>
+          <td>
+            \${u.banned ? '<span class="badge badge-ban">Забанен</span>' : '<span class="badge badge-ok">Активен</span>'}
+            \${u.hwid_locked ? ' <span class="badge badge-lock">HWID</span>' : ''}
+          </td>
+          <td style="color:#6b6f85">\${u.created_at?.slice(0,16)||'—'}</td>
+          <td style="color:#6b6f85">\${u.last_login?.slice(0,16)||'—'}</td>
+          <td><div class="actions">
+            <button class="btn btn-reset" onclick="resetHwid('\${u.username}')">Сброс HWID</button>
+            <button class="btn btn-ban" onclick="toggleBan('\${u.username}',\${u.banned})">\${u.banned?'Разбан':'Бан'}</button>
+            <button class="btn btn-del" onclick="delUser('\${u.username}')">✕</button>
+          </div></td>
+        </tr>
+      \`).join('');
+    }
+
+    function filterTable() {
+      const q = document.getElementById('search').value.toLowerCase();
+      renderUsers(allUsers.filter(u => u.username.toLowerCase().includes(q)));
+    }
+
+    async function resetHwid(username) {
+      if(!confirm('Сбросить HWID для '+username+'?')) return;
+      await fetch('/admin/reset-hwid', { method:'POST', headers:{'Content-Type':'application/json','x-admin-key':KEY}, body:JSON.stringify({username}) });
+      loadUsers();
+    }
+
+    async function toggleBan(username, banned) {
+      await fetch('/admin/ban', { method:'POST', headers:{'Content-Type':'application/json','x-admin-key':KEY}, body:JSON.stringify({username, banned:!banned}) });
+      loadUsers();
+    }
+
+    async function delUser(username) {
+      if(!confirm('Удалить '+username+'? Это нельзя отменить.')) return;
+      await fetch('/admin/user/'+username, { method:'DELETE', headers:{'x-admin-key':KEY} });
+      loadUsers();
+    }
+
+    loadUsers();
+    setInterval(loadUsers, 30000);
+    </script>
+    </body></html>
+  `);
 });
 
 // ─── Регистрация ──────────────────────────────────────────────────────────────
