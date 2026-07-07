@@ -439,6 +439,6 @@ app.get('/admin/panel', (req, res) => {
 
 initDB().then(()=>{
   app.listen(PORT,()=>{
-    console.log(\`✅ Luxe Auth Server on port \${PORT}\`);
+    console.log('✅ Luxe Auth Server on port ' + PORT);
   });
 }).catch(e=>{ console.error('❌ БД ошибка:', e); process.exit(1); });
