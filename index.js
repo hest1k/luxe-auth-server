@@ -46,7 +46,8 @@ async function initDB() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       key_value TEXT UNIQUE NOT NULL,
       duration_minutes INTEGER NOT NULL,
-      used INTEGER DEFAULT 0,
+      max_uses INTEGER DEFAULT 1,
+      uses_count INTEGER DEFAULT 0,
       used_by TEXT DEFAULT NULL,
       used_at TEXT DEFAULT NULL,
       created_at TEXT DEFAULT (datetime('now'))
@@ -54,6 +55,9 @@ async function initDB() {
   ], 'write');
   try { await db.execute('ALTER TABLE users ADD COLUMN hwid_raw TEXT DEFAULT NULL'); } catch(_){}
   try { await db.execute('ALTER TABLE users ADD COLUMN sub_expires TEXT DEFAULT NULL'); } catch(_){}
+  try { await db.execute('ALTER TABLE license_keys ADD COLUMN max_uses INTEGER DEFAULT 1'); } catch(_){}
+  try { await db.execute('ALTER TABLE license_keys ADD COLUMN uses_count INTEGER DEFAULT 0'); } catch(_){}
+  try { await db.execute('ALTER TABLE license_keys DROP COLUMN used'); } catch(_){}
   console.log('✅ БД готова');
 }
 
@@ -155,13 +159,23 @@ app.post('/auth/activate', authMiddleware, async (req, res) => {
     const kr = await db.execute({ sql: 'SELECT * FROM license_keys WHERE key_value=?', args: [key.trim().toUpperCase()] });
     if (!kr.rows.length) return res.status(404).json({ error: 'Ключ не найден' });
     const k = kr.rows[0];
-    if (k.used) return res.status(409).json({ error: 'Ключ уже использован' });
+
+    // Проверяем лимит использований
+    if (Number(k.uses_count) >= Number(k.max_uses)) {
+      return res.status(409).json({ error: `Ключ уже использован максимальное количество раз (${k.max_uses})` });
+    }
 
     const ur = await db.execute({ sql: 'SELECT * FROM users WHERE id=?', args: [req.user.id] });
     const user = ur.rows[0];
 
+    // Проверяем не активировал ли этот пользователь уже этот ключ
+    const usedByList = k.used_by ? k.used_by.split(',') : [];
+    if (usedByList.includes(user.username)) {
+      return res.status(409).json({ error: 'Ты уже активировал этот ключ' });
+    }
+
     let newExpiry;
-    if (k.duration_minutes === -1) {
+    if (Number(k.duration_minutes) === -1) {
       newExpiry = 'unlimited';
     } else {
       const base = (user.sub_expires && user.sub_expires !== 'unlimited' && new Date(user.sub_expires) > new Date())
@@ -171,10 +185,21 @@ app.post('/auth/activate', authMiddleware, async (req, res) => {
     }
 
     await db.execute({ sql: 'UPDATE users SET sub_expires=? WHERE id=?', args: [newExpiry, req.user.id] });
-    await db.execute({ sql: "UPDATE license_keys SET used=1,used_by=?,used_at=datetime('now') WHERE key_value=?", args: [user.username, key.trim().toUpperCase()] });
 
-    res.json({ success: true, sub_expires: newExpiry, has_sub: true,
-      message: k.duration_minutes === -1 ? 'Навсегда активировано!' : `Подписка продлена на ${k.duration_minutes} минут` });
+    // Обновляем счётчик и список использовавших
+    const newUsedBy = usedByList.concat(user.username).join(',');
+    const newCount  = Number(k.uses_count) + 1;
+    await db.execute({
+      sql:  "UPDATE license_keys SET uses_count=?,used_by=?,used_at=datetime('now') WHERE key_value=?",
+      args: [newCount, newUsedBy, key.trim().toUpperCase()]
+    });
+
+    const remaining = Number(k.max_uses) - newCount;
+    res.json({
+      success: true, sub_expires: newExpiry, has_sub: true,
+      message: Number(k.duration_minutes) === -1 ? 'Навсегда активировано!' : 'Подписка активирована на ' + k.duration_minutes + ' минут',
+      remaining_uses: remaining,
+    });
   } catch(e) { res.status(500).json({ error: 'Ошибка сервера: ' + e.message }); }
 });
 
@@ -182,12 +207,12 @@ app.post('/auth/activate', authMiddleware, async (req, res) => {
 
 // Создать ключ
 app.post('/admin/keys/create', adminMiddleware, async (req, res) => {
-  const { duration_minutes, count = 1 } = req.body;
-  if (duration_minutes === undefined) return res.status(400).json({ error: 'Укажи duration_minutes (-1 = навсегда)' });
+  const { duration_minutes, count = 1, max_uses = 1 } = req.body;
+  if (duration_minutes === undefined) return res.status(400).json({ error: 'Укажи duration_minutes' });
   const keys = [];
   for (let i = 0; i < Math.min(count, 100); i++) {
     const k = generateKey();
-    await db.execute({ sql: 'INSERT INTO license_keys (key_value,duration_minutes) VALUES (?,?)', args: [k, duration_minutes] });
+    await db.execute({ sql: 'INSERT INTO license_keys (key_value,duration_minutes,max_uses) VALUES (?,?,?)', args: [k, duration_minutes, max_uses] });
     keys.push(k);
   }
   res.json({ success: true, keys });
@@ -310,13 +335,14 @@ app.get('/admin/panel', (req, res) => {
           </select>
         </div>
         <div id="customDiv" style="display:none"><label>Минут</label><input type="number" id="customMin" min="1" value="60" style="width:100px"/></div>
-        <div><label>Количество</label><input type="number" id="cnt" min="1" max="100" value="1" style="width:80px"/></div>
+        <div><label>Количество ключей</label><input type="number" id="cnt" min="1" max="100" value="1" style="width:80px"/></div>
+        <div><label>Устройств на ключ</label><input type="number" id="maxuses" min="1" max="1000" value="1" style="width:80px"/></div>
         <button class="gbtn" onclick="createKeys()">Создать</button>
       </div>
       <div class="keys-list" id="newKeys"></div>
     </div>
     <input class="search" placeholder="Поиск по ключу..." oninput="filterKeys(this.value)" />
-    <table><thead><tr><th>Ключ</th><th>Длительность</th><th>Статус</th><th>Использован</th><th></th></tr></thead>
+    <table><thead><tr><th>Ключ</th><th>Длительность</th><th>Устройств</th><th>Статус</th><th>Кто использовал</th><th></th></tr></thead>
     <tbody id="ktbody"></tbody></table>
   </div>
 
@@ -388,14 +414,19 @@ app.get('/admin/panel', (req, res) => {
   }
 
   function renderKeys(keys){
-    document.getElementById('ktbody').innerHTML=keys.map(k=>\`
-      <tr class="\${k.used?'key-used':''}">
+    document.getElementById('ktbody').innerHTML=keys.map(k=>{
+      const used=Number(k.uses_count)||0;
+      const max=Number(k.max_uses)||1;
+      const full=used>=max;
+      return \`<tr class="\${full?'key-used':''}">
         <td style="font-family:monospace">\${k.key_value} <button class="copy-btn" onclick="navigator.clipboard.writeText('\${k.key_value}')">copy</button></td>
         <td>\${durLabel(Number(k.duration_minutes))}</td>
-        <td>\${k.used?'<span class="badge ban">Использован</span>':'<span class="badge ok">Активен</span>'}</td>
-        <td style="font-size:11px;color:#6b6f85">\${k.used_by||'—'} \${k.used_at?.slice(0,16)||''}</td>
+        <td>\${used}/\${max} \${full?'<span class="badge ban">Лимит</span>':'<span class="badge ok">Доступен</span>'}</td>
+        <td>\${full?'<span class="badge ban">Исчерпан</span>':'<span class="badge ok">Активен</span>'}</td>
+        <td style="font-size:11px;color:#6b6f85">\${k.used_by||'—'}</td>
         <td><button class="btn bd" onclick="delKey('\${k.key_value}')">✕</button></td>
-      </tr>\`).join('');
+      </tr>\`;
+    }).join('');
   }
 
   function filterKeys(q){renderKeys(allKeys.filter(k=>k.key_value.includes(q.toUpperCase())));}
@@ -404,7 +435,8 @@ app.get('/admin/panel', (req, res) => {
     const sel=document.getElementById('dur').value;
     const dur=sel==='custom'?parseInt(document.getElementById('customMin').value):parseInt(sel);
     const cnt=parseInt(document.getElementById('cnt').value)||1;
-    const r=await fetch('/admin/keys/create',{method:'POST',headers:{'Content-Type':'application/json','x-admin-key':K},body:JSON.stringify({duration_minutes:dur,count:cnt})});
+    const maxuses=parseInt(document.getElementById('maxuses').value)||1;
+    const r=await fetch('/admin/keys/create',{method:'POST',headers:{'Content-Type':'application/json','x-admin-key':K},body:JSON.stringify({duration_minutes:dur,count:cnt,max_uses:maxuses})});
     const d=await r.json();
     document.getElementById('newKeys').innerHTML=d.keys.map(k=>\`<div class="key-row">\${k}<button class="copy-btn" onclick="navigator.clipboard.writeText('\${k}')">copy</button></div>\`).join('');
     loadKeys();
